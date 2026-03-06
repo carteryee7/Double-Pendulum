@@ -12,12 +12,15 @@ clock = pygame.time.Clock()
 
 l1 = 100
 l2 = 100
-m1 = 10
-m2 = 10
+m1 = 500
+m2 = 500
 
 axis = (400, 200)
 
 path = []
+
+# Collision cooldown tracking
+collision_cooldown = {}
 
 state: list[float] = [math.pi/2, 0.1, 0.0, 0.1]
 
@@ -47,7 +50,7 @@ balls.append(b)
 balls.append(b2)
 balls.append(b3)
 
-def derivatives(t, state, L1, L2, m1, m2, g=-9.81):
+def derivatives(t, state, L1, L2, m1, m2, g=-9.81, damping=0.1):
     θ1, ω1, θ2, ω2 = state  # angles and angular velocities
     Δθ = θ1 - θ2
 
@@ -58,6 +61,7 @@ def derivatives(t, state, L1, L2, m1, m2, g=-9.81):
         -g*(2*m1+m2)*np.sin(θ1)
         - m2*g*np.sin(θ1 - 2*θ2)
         - 2*np.sin(Δθ)*m2*(ω2**2*L2 + ω1**2*L1*np.cos(Δθ))
+        - damping*ω1  # Air damping
     ) / denom1
 
     dω2 = (
@@ -66,6 +70,7 @@ def derivatives(t, state, L1, L2, m1, m2, g=-9.81):
             + g*(m1+m2)*np.cos(θ1)
             + ω2**2*L2*m2*np.cos(Δθ)
         )
+        - damping*ω2  # Air damping
     ) / denom2
 
     return np.array([ω1, dω1, ω2, dω2])  # [dθ1, dω1, dθ2, dω2]
@@ -119,6 +124,14 @@ def check_ball_collision(b1: Ball, b2: Ball):
         b2.velo[0] = calc_final_velo(b2.mass, b1.mass, v2x, v1x)
         b1.velo[1] = calc_final_velo(b1.mass, b2.mass, v1y, v2y)
         b2.velo[1] = calc_final_velo(b2.mass, b1.mass, v2y, v1y)
+        
+        # Position correction to separate overlapping balls
+        overlap = b1.radius + b2.radius - distance
+        angle = math.atan2(b2.y - b1.y, b2.x - b1.x)
+        b1.x -= overlap / 2 * math.cos(angle)
+        b1.y -= overlap / 2 * math.sin(angle)
+        b2.x += overlap / 2 * math.cos(angle)
+        b2.y += overlap / 2 * math.sin(angle)
 
 def check_ball_bob_collision(b1: Ball, b2: Bob):
     distance = ((b1.x - b2.x)**2 + (b1.y - b2.y)**2) ** 0.5
@@ -127,9 +140,10 @@ def check_ball_bob_collision(b1: Ball, b2: Bob):
     else:
         return False
 
+"""
 def ball_bob_collision(b1: Ball, b2: Bob):
     v1x, v1y = b1.get_velo()
-    v2x, v2y = [b2.get_velo() * np.cos(b2.θ), b2.get_velo() * np.sin(b2.θ)]
+    v2x, v2y = [-b2.get_velo() * np.sin(b2.θ), b2.get_velo() * np.cos(b2.θ)]
     b1.velo[0] = calc_final_velo(b1.mass, b2.mass, v1x, v2x)
     b1.velo[1] = calc_final_velo(b1.mass, b2.mass, v1y, v2y)
 
@@ -138,7 +152,63 @@ def ball_bob_collision(b1: Ball, b2: Bob):
     if b2.get_velo() >= 0.0:
         return math.sqrt(x_comp**2 + y_comp**2) / b2.radius
     else:
-        return -(math.sqrt(x_comp**2 + y_comp**2) / b2.radius)
+        return -(math.sqrt(x_comp**2 + y_comp**2) / b2.radius)"""
+
+def ball_bob_collision(ball: Ball, bob: Bob, bob_L: float, axis_pos, state, state_index):
+    """Apply 2D rigid body collision impulse between ball and bob."""
+    # Collision normal (from bob to ball)
+    dx = ball.x - bob.x
+    dy = ball.y - bob.y
+    dist = math.sqrt(dx**2 + dy**2)
+    
+    if dist < 0.001:
+        return
+    
+    nx = dx / dist
+    ny = dy / dist
+    
+    # Vector from pivot to bob
+    r_bob_x = bob.x - axis_pos[0]
+    r_bob_y = bob.y - axis_pos[1]
+    
+    # Ball velocity
+    v_ball_x, v_ball_y = ball.get_velo()
+    
+    # Bob's tangential velocity at collision point
+    omega_bob = state[state_index]
+    v_bob_x = -omega_bob * r_bob_y
+    v_bob_y = omega_bob * r_bob_x
+    
+    # Relative velocity
+    rel_vx = v_ball_x - v_bob_x
+    rel_vy = v_ball_y - v_bob_y
+    rel_v_normal = rel_vx * nx + rel_vy * ny
+    
+    # Skip if objects moving apart
+    if rel_v_normal > 0:
+        return
+    
+    # Physics parameters
+    m_ball = ball.mass
+    m_bob = bob.mass
+    I_bob = m_bob * bob_L * bob_L  # Moment of inertia for point mass at distance L
+    e = 0.3  # Coefficient of restitution (lower = more damping)
+    
+    # Cross product for rotation
+    r_bob_cross_n = r_bob_x * ny - r_bob_y * nx
+    
+    # Impulse denominator
+    denom = 1/m_ball + 1/m_bob + (r_bob_cross_n**2) / I_bob
+    
+    # Impulse magnitude
+    j = -(1 + e) * rel_v_normal / denom
+    
+    # Apply impulse to ball
+    ball.velo[0] += (j * nx) / m_ball
+    ball.velo[1] += (j * ny) / m_ball
+    
+    # Apply impulse to bob's angular velocity
+    state[state_index] += (r_bob_cross_n * j) / I_bob
 
 
 # calculates final velocity after a collision
@@ -194,19 +264,27 @@ while running:
 
     for ball in balls:
         if check_ball_bob_collision(ball, bob1):
-            distance = ((ball.x - bob1.x)**2 + (ball.y - bob1.y)**2) ** 0.5
-            overlap = ball.radius + bob1.radius - distance
-            angle = math.atan2(ball.y - bob1.y, ball.x - bob1.x)
-            ball.x += overlap * math.cos(angle)
-            ball.y += overlap * math.sin(angle)
-            state[1] = ball_bob_collision(ball, bob1)
+            # Check collision cooldown
+            key = (id(ball), id(bob1))
+            if key not in collision_cooldown or collision_cooldown[key] <= 0:
+                distance = ((ball.x - bob1.x)**2 + (ball.y - bob1.y)**2) ** 0.5
+                overlap = ball.radius + bob1.radius - distance
+                angle = math.atan2(ball.y - bob1.y, ball.x - bob1.x)
+                ball.x += overlap * math.cos(angle)
+                ball.y += overlap * math.sin(angle)
+                ball_bob_collision(ball, bob1, l1, axis, state, 1)
+                collision_cooldown[key] = 5  # 5 frame cooldown
         if check_ball_bob_collision(ball, bob2):
-            distance = ((ball.x - bob2.x)**2 + (ball.y - bob2.y)**2) ** 0.5
-            overlap = ball.radius + bob2.radius - distance
-            angle = math.atan2(ball.y - bob2.y, ball.x - bob2.x)
-            ball.x += overlap * math.cos(angle)
-            ball.y += overlap * math.sin(angle)
-            state[3] = ball_bob_collision(ball, bob2)
+            # Check collision cooldown
+            key = (id(ball), id(bob2))
+            if key not in collision_cooldown or collision_cooldown[key] <= 0:
+                distance = ((ball.x - bob2.x)**2 + (ball.y - bob2.y)**2) ** 0.5
+                overlap = ball.radius + bob2.radius - distance
+                angle = math.atan2(ball.y - bob2.y, ball.x - bob2.x)
+                ball.x += overlap * math.cos(angle)
+                ball.y += overlap * math.sin(angle)
+                ball_bob_collision(ball, bob2, l2, axis, state, 3)
+                collision_cooldown[key] = 5  # 5 frame cooldown
 
     check_ball_bob_collision(b, bob1)
 
@@ -235,5 +313,9 @@ while running:
 
     pygame.display.flip()
     clock.tick(60)  # 60 FPS
+    
+    # Decrement cooldown timers
+    for key in collision_cooldown:
+        collision_cooldown[key] -= 1
 
 pygame.quit()

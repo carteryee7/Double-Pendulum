@@ -2,6 +2,12 @@
 
 This project is an interactive Python/Pygame simulation of a double pendulum with additional bouncing balls that can collide with each other and with pendulum bobs. It is designed as a visual playground for nonlinear dynamics and collision behavior.
 
+## Demo
+
+
+https://github.com/user-attachments/assets/80cea082-a2cc-430d-a46c-29351b80a573
+
+
 ## Project Overview
 
 - Simulates a two-link pendulum system in real time.
